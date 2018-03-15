@@ -72,8 +72,8 @@ def _main(args):
     boxes =  [boxes_dict[f] for f in file_list]
     
     print("Data loaded.")
-    assert len(image) == len(boxes)
-    print("There are %s images and boxes\nPreprocessing data..." % len(image))
+    assert len(images) == len(boxes)
+    print("There are %s images and boxes\nPreprocessing data..." % len(images))
     
     image_data, boxes = process_data(images, boxes)
 
@@ -376,8 +376,6 @@ def draw(model_body, class_names, anchors, image_data, image_set='val',
         # To display (pauses the program):
         plt.imshow(image_with_boxes, interpolation='nearest')
         plt.show()
-
-
 
 if __name__ == '__main__':
     args = argparser.parse_args()
