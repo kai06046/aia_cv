@@ -8,27 +8,29 @@ import random
 
 import numpy as np
 from keras import backend as K
-from keras.models import load_model
+from keras.layers import Input, Lambda, Conv2D
+from keras.models import load_model, Model
 from PIL import Image, ImageDraw, ImageFont
+import tensorflow as tf
 
-from yad2k.models.keras_yolo import yolo_eval, yolo_head
+from yad2k.models.keras_yolo import (preprocess_true_boxes, yolo_body,
+                                     yolo_eval, yolo_head, yolo_loss)
 
 parser = argparse.ArgumentParser(
     description='Run a YOLO_v2 style detection model on test images..')
 parser.add_argument(
-    'model_path',
-    help='path to h5 model file containing body'
-    'of a YOLO_v2 model')
+    'weights_path',
+    help='path to h5 weights of a YOLO_v2 model')
 parser.add_argument(
     '-a',
     '--anchors_path',
     help='path to anchors file, defaults to yolo_anchors.txt',
-    default='model_data/yolo_anchors.txt')
+    default='/data/examples/yolo_data/model_data/yolo_anchors.txt')
 parser.add_argument(
     '-c',
     '--classes_path',
     help='path to classes file, defaults to coco_classes.txt',
-    default='model_data/coco_classes.txt')
+    default='/data/examples/yolo_data/model_data/coco_classes.txt')
 parser.add_argument(
     '-t',
     '--test_path',
@@ -52,10 +54,81 @@ parser.add_argument(
     help='threshold for non max suppression IOU, default .5',
     default=.5)
 
+def create_model(anchors, class_names, load_pretrained=False, freeze_body=True):
+    '''
+    returns the body of the model and the model
+
+    # Params:
+
+    load_pretrained: whether or not to load the pretrained model or initialize all weights
+
+    freeze_body: whether or not to freeze all weights except for the last layer's
+
+    # Returns:
+
+    model_body: YOLOv2 with new output layer
+
+    model: YOLOv2 with custom loss Lambda layer
+
+    '''
+
+    detectors_mask_shape = (13, 13, 5, 1)
+    matching_boxes_shape = (13, 13, 5, 5)
+
+    # Create model input layers.
+    image_input = Input(shape=(416, 416, 3))
+    boxes_input = Input(shape=(None, 5))
+    detectors_mask_input = Input(shape=detectors_mask_shape)
+    matching_boxes_input = Input(shape=matching_boxes_shape)
+
+    # Create model body.
+    yolo_model = yolo_body(image_input, len(anchors), len(class_names))
+    topless_yolo = Model(yolo_model.input, yolo_model.layers[-2].output)
+
+    if load_pretrained:
+        # Save topless yolo:
+        topless_yolo_path = os.path.join('/data/examples/yolo_data/model_data', 'yolo_topless.h5')
+        if not os.path.exists(topless_yolo_path):
+            print("CREATING TOPLESS WEIGHTS FILE")
+            try:
+                yolo_path = os.path.join('model_data', 'yolo.h5')
+            except:
+                os.mkdir('model_data')
+                yolo_path = os.path.join('model_data', 'yolo.h5')
+            model_body = load_model(yolo_path)
+            model_body = Model(model_body.inputs, model_body.layers[-2].output)
+            model_body.save_weights(topless_yolo_path)
+        topless_yolo.load_weights(topless_yolo_path)
+
+    if freeze_body:
+        for layer in topless_yolo.layers:
+            layer.trainable = False
+    final_layer = Conv2D(len(anchors)*(5+len(class_names)), (1, 1), activation='linear')(topless_yolo.output)
+
+    model_body = Model(image_input, final_layer)
+
+    # Place model loss on CPU to reduce GPU memory usage.
+    with tf.device('/cpu:0'):
+        # TODO: Replace Lambda with custom Keras layer for loss.
+        model_loss = Lambda(
+            yolo_loss,
+            output_shape=(1, ),
+            name='yolo_loss',
+            arguments={'anchors': anchors,
+                       'num_classes': len(class_names)})([
+                           model_body.output, boxes_input,
+                           detectors_mask_input, matching_boxes_input
+                       ])
+
+    model = Model(
+        [model_body.input, boxes_input, detectors_mask_input,
+         matching_boxes_input], model_loss)
+
+    return model_body, model
 
 def _main(args):
-    model_path = os.path.expanduser(args.model_path)
-    assert model_path.endswith('.h5'), 'Keras model must be a .h5 file.'
+    weights_path = os.path.expanduser(args.weights_path)
+    assert weights_path.endswith('.h5'), 'Keras model must be a .h5 file.'
     anchors_path = os.path.expanduser(args.anchors_path)
     classes_path = os.path.expanduser(args.classes_path)
     test_path = os.path.expanduser(args.test_path)
@@ -65,7 +138,7 @@ def _main(args):
         print('Creating output path {}'.format(output_path))
         os.mkdir(output_path)
 
-    sess = K.get_session()  # TODO: Remove dependence on Tensorflow session.
+    sess = K.get_session()
 
     with open(classes_path) as f:
         class_names = f.readlines()
@@ -76,7 +149,9 @@ def _main(args):
         anchors = [float(x) for x in anchors.split(',')]
         anchors = np.array(anchors).reshape(-1, 2)
 
-    yolo_model = load_model(model_path)
+    # yolo_model = load_model(model_path)
+    yolo_model, model = create_model(anchors, class_names, load_pretrained=False, freeze_body=False)
+    yolo_model.load_weights(weights_path)
 
     # Verify model, anchors, and classes are compatible
     num_classes = len(class_names)
@@ -87,7 +162,7 @@ def _main(args):
         'Mismatch between model and given anchor and class sizes. ' \
         'Specify matching anchors and classes with --anchors_path and ' \
         '--classes_path flags.'
-    print('{} model, anchors, and classes loaded.'.format(model_path))
+    print('{} model, anchors, and classes loaded.'.format(weights_path))
 
     # Check if model is fully convolutional, assuming channel last order.
     model_image_size = yolo_model.layers[0].input_shape[1:3]
@@ -177,7 +252,7 @@ def _main(args):
             else:
                 text_origin = np.array([left, top + 1])
 
-            # My kingdom for a good redistributable image drawing library.
+            # draw boxes and label
             for i in range(thickness):
                 draw.rectangle(
                     [left + i, top + i, right - i, bottom - i],
@@ -191,9 +266,7 @@ def _main(args):
             detected.append([label, (left, top, right, bottom)])
         image.save(os.path.join(output_path, image_file), quality=90)
         output_results.append([image, detected])
-        
-    sess.close()
-    
+            
     return list(zip(*output_results))
 
 if __name__ == '__main__':

@@ -15,7 +15,7 @@ import tensorflow as tf
 from keras import backend as K
 from keras.layers import Input, Lambda, Conv2D
 from keras.models import load_model, Model
-from keras.callbacks import TensorBoard, ModelCheckpoint, EarlyStopping
+from keras.callbacks import TensorBoard, ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 
 from yad2k.models.keras_yolo import (preprocess_true_boxes, yolo_body,
                                      yolo_eval, yolo_head, yolo_loss)
@@ -28,8 +28,8 @@ argparser = argparse.ArgumentParser(
 argparser.add_argument(
     '-d',
     '--data_path',
-    help="path to numpy data file (.npz) containing np.object array 'boxes' and np.uint8 array 'images'",
-    default=os.path.join('..', 'DATA', 'underwater_data.npz'))
+    help="path to image data",
+    default="/data/examples/yolo_data/train_img/")
 
 argparser.add_argument(
     '-b',
@@ -39,13 +39,23 @@ argparser.add_argument(
     '-a',
     '--anchors_path',
     help='path to anchors file, defaults to yolo_anchors.txt',
-    default=os.path.join('model_data', 'yolo_anchors.txt'))
+    default="/data/examples/yolo_data/model_data/yolo_anchors.txt")
 
 argparser.add_argument(
     '-c',
     '--classes_path',
     help='path to classes file, defaults to pascal_classes.txt',
-    default=os.path.join('..', 'DATA', 'underwater_classes.txt'))
+    default="/data/examples/yolo_data/model_data/pascal_classes.txt")
+
+argparser.add_argument(
+    '-1',
+    '--epoch_1',
+    default=5)
+
+argparser.add_argument(
+    '-2',
+    '--epoch_2',
+    default=30)
 
 # Default anchor boxes
 YOLO_ANCHORS = np.array(
@@ -57,6 +67,8 @@ def _main(args):
     boxes_path = os.path.expanduser(args.boxes_path)
     classes_path = os.path.expanduser(args.classes_path)
     anchors_path = os.path.expanduser(args.anchors_path)
+    stage_1_epoch = args.epoch_1
+    stage_2_epoch = args.epoch_2
 
     class_names = get_classes(classes_path)
     anchors = get_anchors(anchors_path)
@@ -94,7 +106,9 @@ def _main(args):
         image_data,
         boxes,
         detectors_mask,
-        matching_true_boxes
+        matching_true_boxes,
+        stage_1_epoch,
+        stage_2_epoch
     )
 
     print('val')
@@ -103,7 +117,7 @@ def _main(args):
         anchors,
         image_data,
         image_set='val', # assumes training/validation split is 0.9
-        weights_name='trained_stage_3_best.h5',
+        weights_name='trained_stage_2_best.h5',
         save_all=False)
     
     print('train')    
@@ -112,7 +126,7 @@ def _main(args):
         anchors,
         image_data,
         image_set='train', # assumes training/validation split is 0.9
-        weights_name='trained_stage_3_best.h5',
+        weights_name='trained_stage_2_best.h5',
         save_all=False)
 
 
@@ -260,7 +274,8 @@ def create_model(anchors, class_names, load_pretrained=True, freeze_body=True):
 
     return model_body, model
 
-def train(model, class_names, anchors, image_data, boxes, detectors_mask, matching_true_boxes, validation_split=0.1):
+def train(model, class_names, anchors, image_data, boxes, detectors_mask, matching_true_boxes, stage_1_epoch=5,
+        stage_2_epoch=30, validation_split=0.1):
     '''
     retrain/fine-tune the model
 
@@ -277,15 +292,16 @@ def train(model, class_names, anchors, image_data, boxes, detectors_mask, matchi
 
 
     logging = TensorBoard()
-    checkpoint = ModelCheckpoint("trained_stage_3_best.h5", monitor='val_loss',
+    checkpoint = ModelCheckpoint("trained_stage_2_best.h5", monitor='val_loss',
                                  save_weights_only=True, save_best_only=True)
     early_stopping = EarlyStopping(monitor='val_loss', min_delta=0, patience=15, verbose=1, mode='auto')
+    rlp = ReduceLROnPlateau(factor=0.5, patience=3)
 
     model.fit([image_data, boxes, detectors_mask, matching_true_boxes],
               np.zeros(len(image_data)),
               validation_split=validation_split,
               batch_size=30,
-              epochs=5,
+              epochs=stage_1_epoch,
               callbacks=[logging])
     
     model.save_weights('trained_stage_1_w.h5')
@@ -302,26 +318,15 @@ def train(model, class_names, anchors, image_data, boxes, detectors_mask, matchi
             'yolo_loss': lambda y_true, y_pred: y_pred
        })  # This is a hack to use the custom loss function in the last layer.
 
-
     model.fit([image_data, boxes, detectors_mask, matching_true_boxes],
               np.zeros(len(image_data)),
               validation_split=0.1,
               batch_size=8,
-              epochs=30,
-              callbacks=[logging])
+              epochs=stage_2_epoch,
+              callbacks=[logging, checkpoint, early_stopping, rlp])
 
     model_save = Model(model.inputs, model.layers[-5].output)
     model_save.save('trained_stage_2.h5')
-
-    model.fit([image_data, boxes, detectors_mask, matching_true_boxes],
-              np.zeros(len(image_data)),
-              validation_split=0.1,
-              batch_size=8,
-              epochs=30,
-              callbacks=[logging, checkpoint, early_stopping])
-
-    model_save = Model(model.inputs, model.layers[-5].output)
-    model_save.save('trained_stage_3.h5')
 
 def draw(model_body, class_names, anchors, image_data, image_set='val',
             weights_name='trained_stage_3_best.h5', out_path="output_images", save_all=True):
