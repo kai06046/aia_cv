@@ -71,11 +71,13 @@ def _main(args):
     images = [cv2.imread(os.path.join(data_path, f))[:, :, ::-1] for f in file_list]
     boxes =  [boxes_dict[f] for f in file_list]
     
-    print("data loaded")
+    print("Data loaded.")
+    assert len(image) == len(boxes)
+    print("There are %s images and boxes\nPreprocessing data..." % len(image))
     
     image_data, boxes = process_data(images, boxes)
 
-    print("process done")
+    print("Done preprocessing!")
     
     anchors = YOLO_ANCHORS
 
@@ -219,10 +221,14 @@ def create_model(anchors, class_names, load_pretrained=True, freeze_body=True):
 
     if load_pretrained:
         # Save topless yolo:
-        topless_yolo_path = os.path.join('model_data', 'yolo_topless.h5')
+        topless_yolo_path = os.path.join('/data/examples/yolo_data/model_data', 'yolo_topless.h5')
         if not os.path.exists(topless_yolo_path):
             print("CREATING TOPLESS WEIGHTS FILE")
-            yolo_path = os.path.join('model_data', 'yolo.h5')
+            try:
+                yolo_path = os.path.join('model_data', 'yolo.h5')
+            except:
+                os.mkdir('model_data')
+                yolo_path = os.path.join('model_data', 'yolo.h5')
             model_body = load_model(yolo_path)
             model_body = Model(model_body.inputs, model_body.layers[-2].output)
             model_body.save_weights(topless_yolo_path)
